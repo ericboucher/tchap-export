@@ -5,12 +5,14 @@ conversation you have open, restricted to a date range you choose.
 
 Tchap is a soft-fork of Element/Matrix web client, so this extension targets its
 `mx_*` DOM structure. Per-message timestamps aren't reliably present in the DOM
-(Element only renders a timestamp on hover, and even then it's just "HH:MM" with
-no date), so dates are read from the `.mx_DateSeparator` headings Element inserts
-between days ("today", "yesterday", or a full date) — this gives day-level
-accuracy for every message. Where possible, the extension also walks the React
-fiber tree to read the tile's underlying `MatrixEvent` directly for an exact
-millisecond timestamp and sender.
+(Element only renders a timestamp while a tile is hovered, and even then it's
+just "HH:MM" with no date), so the day for every message comes from the
+`.mx_DateSeparator` headings Element inserts between days ("today", "yesterday",
+or a full date), and the exact hour is recovered by briefly simulating a hover
+over each tile to reveal its "HH:MM" text. Where possible, the extension also
+walks the React fiber tree to read the tile's underlying `MatrixEvent` directly
+for an exact millisecond timestamp and sender, skipping the hover step entirely
+for those messages.
 
 ## Install (unpacked, for development/personal use)
 
@@ -47,6 +49,10 @@ export has started.
   history pagination until a day older than the requested start date is loaded
   (or there's no more history), then does one final pass to extract and filter
   messages.
+- For every message still missing an exact timestamp after that pass, it
+  simulates a hover (a bubbling `mouseover`, a couple of animation frames to
+  let React re-render, then `mouseout`) to read the revealed "HH:MM" and
+  combines it with the already-known day.
 - Only `m.room.message` and `m.sticker` events are included (no membership
   changes, reactions, or redactions).
 - The extracted messages are exported as a local file download (no data leaves
@@ -57,9 +63,13 @@ export has started.
 - Only messages your browser can already decrypt (i.e. that you can see while
   viewing the room) are exported — this works like a personal export tool, not
   a bypass of any access control.
-- Messages without an exact fiber-derived timestamp are filtered by *day*, not
-  time-of-day — e.g. picking a start time of 6pm still includes that whole day's
-  earlier messages if their precise timestamp couldn't be read.
+- If a message's hour still can't be recovered (fiber lookup failed and the
+  hover simulation revealed nothing), it falls back to being filtered by *day*
+  only — e.g. picking a start time of 6pm would still include that day's
+  earlier messages in that rare case.
+- The hover-reveal pass adds a couple of animation frames per message that
+  needs it, so exporting a very long, filter-inclusive range can take a while;
+  progress is shown in the on-page status badge.
 - Encrypted media and files are exported as a placeholder plus their filename,
   not the actual file contents.
 - Very long histories are capped at ~800 scroll iterations / 8 minutes as a
