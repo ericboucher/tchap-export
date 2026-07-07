@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Tchap Conversation Exporter",
+  "version": "1.0.0",
+  "description": "Export the messages of the Tchap conversation you're viewing between two dates, as TXT, CSV or JSON.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Export Tchap conversation"
+  },
+  "host_permissions": ["*://*.tchap.gouv.fr/*"],
+  "content_scripts": [
+    {
+      "matches": ["*://*.tchap.gouv.fr/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
