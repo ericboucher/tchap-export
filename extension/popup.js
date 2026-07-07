@@ -25,8 +25,8 @@ form.addEventListener('submit', async (e) => {
   statusEl.textContent = '';
 
   const tab = await getActiveTab();
-  if (!tab || !tab.url || !/tchap\.gouv\.fr/.test(tab.url)) {
-    statusEl.textContent = 'Open a Tchap conversation tab first.';
+  if (!tab) {
+    statusEl.textContent = 'Could not find the active tab.';
     return;
   }
 
@@ -41,7 +41,8 @@ form.addEventListener('submit', async (e) => {
 
   chrome.tabs.sendMessage(tab.id, { type: 'PING' }, (resp) => {
     if (chrome.runtime.lastError || !resp || !resp.ready) {
-      statusEl.textContent = 'Open a Tchap conversation with messages visible, then try again.';
+      statusEl.textContent =
+        'Could not reach the Tchap page. Make sure a conversation is open with messages visible, reload the tab, and try again.';
       return;
     }
     chrome.tabs.sendMessage(tab.id, { type: 'START_EXTRACTION', startTs, endTs, format });
