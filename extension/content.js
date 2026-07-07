@@ -20,6 +20,7 @@
     roomName: '.mx_RoomHeader_heading, .mx_RoomHeader_name',
     dateSeparator: '.mx_TimelineSeparator',
     dateHeading: '.mx_DateSeparator_dateHeading',
+    timestamp: '.mx_MessageTimestamp',
   };
 
   const MONTHS = {
@@ -91,14 +92,28 @@
     return key ? dom[key] : null;
   }
 
+  function looksLikeMatrixEvent(val) {
+    return (
+      val &&
+      typeof val === 'object' &&
+      typeof val.getTs === 'function' &&
+      typeof val.getId === 'function' &&
+      typeof val.getSender === 'function'
+    );
+  }
+
+  // Duck-types every prop value rather than assuming a fixed key name like
+  // `mxEvent`, since the exact prop name is an internal implementation detail
+  // that can change between matrix-react-sdk versions.
   function findMatrixEvent(tileEl) {
     let fiber = getReactFiber(tileEl);
     let depth = 0;
     while (fiber && depth < 60) {
       const props = fiber.memoizedProps;
       if (props) {
-        const candidate = props.mxEvent || props.event;
-        if (candidate && typeof candidate.getTs === 'function') return candidate;
+        for (const key of Object.keys(props)) {
+          if (looksLikeMatrixEvent(props[key])) return props[key];
+        }
       }
       fiber = fiber.return;
       depth++;
@@ -329,6 +344,57 @@
     });
   }
 
+  // ---- Hover-reveal fallback for exact time-of-day -------------------------------
+  //
+  // Element only renders `.mx_MessageTimestamp` while a tile is hovered (and even
+  // then it's just "HH:MM", no date - the date comes from the day separator we
+  // already track). For messages where the React-internals lookup didn't yield an
+  // exact timestamp, simulate a hover to reveal it.
+
+  function frameSleep() {
+    return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }
+
+  function parseHHMM(text) {
+    const m = text && text.match(/(\d{1,2})[:h](\d{2})/);
+    if (!m) return null;
+    const h = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    if (h > 23 || mm > 59) return null;
+    return { h, m: mm };
+  }
+
+  async function revealTileTimeOfDay(tileEl) {
+    const opts = { bubbles: true, cancelable: true, view: window };
+    tileEl.dispatchEvent(new MouseEvent('mouseover', opts));
+    await frameSleep();
+    const tsEl = tileEl.querySelector(SELECTORS.timestamp);
+    const text = tsEl ? tsEl.textContent.trim() : null;
+    tileEl.dispatchEvent(new MouseEvent('mouseout', { ...opts, relatedTarget: document.body }));
+    return parseHHMM(text);
+  }
+
+  async function refineTimesOfDay(records, isCancelled, onProgress) {
+    const pending = records.filter((r) => !r.exact);
+    let refined = 0;
+    for (let i = 0; i < pending.length; i++) {
+      if (isCancelled()) break;
+      const rec = pending[i];
+      const tileEl = document.querySelector(`[data-event-id="${rec.id}"]`);
+      if (!tileEl) continue;
+      const hm = await revealTileTimeOfDay(tileEl);
+      if (hm) {
+        const d = new Date(rec.day);
+        d.setHours(hm.h, hm.m, 0, 0);
+        rec.ts = d.getTime();
+        rec.exact = true;
+        refined++;
+      }
+      if (i % 20 === 0) onProgress(i, pending.length);
+    }
+    return refined;
+  }
+
   function getRoomName() {
     const el = document.querySelector(SELECTORS.roomName);
     return el && el.textContent.trim() ? el.textContent.trim() : 'conversation';
@@ -501,7 +567,16 @@
       updateWidget('Extracting messages…');
       const { records } = walkTimeline(true);
       const endDayMs = startOfDay(new Date(endTs)).getTime();
-      const results = records.filter((r) => (r.exact ? r.ts >= startTs && r.ts <= endTs : r.day >= startDayMs && r.day <= endDayMs));
+      const inRange = records.filter((r) => (r.exact ? r.ts >= startTs && r.ts <= endTs : r.day >= startDayMs && r.day <= endDayMs));
+
+      updateWidget(`Reading exact times… 0/${inRange.length}`);
+      await refineTimesOfDay(
+        inRange,
+        () => cancelled,
+        (i, total) => updateWidget(`Reading exact times… ${i}/${total}`)
+      );
+
+      const results = inRange.filter((r) => (r.exact ? r.ts >= startTs && r.ts <= endTs : r.day >= startDayMs && r.day <= endDayMs));
 
       if (results.length === 0) {
         updateWidget('No messages found in that date range.');
