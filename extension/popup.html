@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Tchap Conversation Exporter</title>
+    <style>
+      body {
+        width: 280px;
+        font: 13px/1.4 system-ui, -apple-system, sans-serif;
+        padding: 12px;
+        margin: 0;
+        color: #1a1a1a;
+      }
+      h1 {
+        font-size: 14px;
+        margin: 0 0 10px;
+      }
+      label {
+        display: block;
+        margin: 10px 0 4px;
+        font-weight: 600;
+      }
+      input[type='datetime-local'] {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 4px;
+      }
+      fieldset {
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        margin: 10px 0 0;
+        padding: 6px 10px;
+      }
+      legend {
+        font-weight: 600;
+        padding: 0 4px;
+      }
+      .format-row {
+        display: flex;
+        gap: 12px;
+      }
+      button {
+        width: 100%;
+        margin-top: 12px;
+        padding: 8px;
+        border: none;
+        border-radius: 6px;
+        background: #0b6efd;
+        color: #fff;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #0958d9;
+      }
+      #status {
+        margin-top: 10px;
+        font-size: 12px;
+        color: #444;
+        min-height: 32px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Export Tchap conversation</h1>
+    <form id="form">
+      <label for="start">From</label>
+      <input type="datetime-local" id="start" required />
+
+      <label for="end">To</label>
+      <input type="datetime-local" id="end" required />
+
+      <fieldset>
+        <legend>Format</legend>
+        <div class="format-row">
+          <label><input type="radio" name="format" value="txt" checked /> Text</label>
+          <label><input type="radio" name="format" value="csv" /> CSV</label>
+          <label><input type="radio" name="format" value="json" /> JSON</label>
+        </div>
+      </fieldset>
+
+      <button type="submit">Extract &amp; download</button>
+    </form>
+    <div id="status"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>
