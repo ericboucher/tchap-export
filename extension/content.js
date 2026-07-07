@@ -1,22 +1,40 @@
 // Tchap Conversation Exporter - content script
 //
 // Tchap is a soft-fork of Element/matrix-react-sdk, so the DOM keeps the
-// same `mx_*` class names. Rather than scraping visible, locale-dependent
-// text, we walk the React fiber tree from each message tile to read the
-// underlying MatrixEvent object directly (exact timestamp, sender, body),
-// which is stable regardless of language, message grouping, or theme.
-// A DOM-text fallback is used only if that lookup fails.
+// same `mx_*` class names. Per-message timestamps are not reliably present
+// in the DOM (Element only renders `.mx_MessageTimestamp` on hover, and even
+// then it carries no date - just "HH:MM"), so dates are read from the
+// `.mx_DateSeparator` headings ("today", "yesterday", or a full date) that
+// Element inserts between days. Where possible we also walk the React fiber
+// tree from a tile to read the underlying MatrixEvent for an exact
+// millisecond timestamp; the date-separator value is the fallback used for
+// day-level filtering when that isn't available.
 
 (() => {
   const SELECTORS = {
     eventTile: '.mx_EventTile',
     scrollPanel: '.mx_ScrollPanel',
+    messageList: 'ol.mx_RoomView_MessageList',
     spinner: '.mx_Spinner',
     topMarker: '.mx_RoomWelcomeView, .mx_NewRoomIntro, .mx_RoomView_topUnreadBar',
     roomName: '.mx_RoomHeader_heading, .mx_RoomHeader_name',
-    senderName: '.mx_DisambiguatedProfile_displayName, .mx_EventTile_senderDetails, .mx_EventTile_sender',
-    body: '.mx_EventTile_body',
-    timestamp: '.mx_MessageTimestamp',
+    dateSeparator: '.mx_TimelineSeparator',
+    dateHeading: '.mx_DateSeparator_dateHeading',
+  };
+
+  const MONTHS = {
+    jan: 0, janv: 0, january: 0, janvier: 0,
+    feb: 1, febr: 1, february: 1, fevr: 1, févr: 1, fevrier: 1, février: 1,
+    mar: 2, march: 2, mars: 2,
+    apr: 3, avr: 3, april: 3, avril: 3,
+    may: 4, mai: 4,
+    jun: 5, juin: 5, june: 5,
+    jul: 6, juil: 6, july: 6, juillet: 6,
+    aug: 7, aout: 7, août: 7, august: 7,
+    sep: 8, sept: 8, september: 8, septembre: 8,
+    oct: 9, october: 9, octobre: 9,
+    nov: 10, november: 10, novembre: 10,
+    dec: 11, déc: 11, december: 11, decembre: 11, décembre: 11,
   };
 
   let running = false;
@@ -27,7 +45,44 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  // ---- React internals access -------------------------------------------------
+  function startOfDay(d) {
+    const r = new Date(d.getTime());
+    r.setHours(0, 0, 0, 0);
+    return r;
+  }
+
+  // ---- Date-separator parsing ("today" / "yesterday" / full date) --------------
+
+  function parseDaySeparatorText(text) {
+    const norm = (text || '').trim().toLowerCase();
+    if (!norm) return null;
+    if (/^(today|aujourd'?hui)$/.test(norm)) return startOfDay(new Date());
+    if (/^(yesterday|hier)$/.test(norm)) {
+      const d = startOfDay(new Date());
+      d.setDate(d.getDate() - 1);
+      return d;
+    }
+    const numbers = [...norm.matchAll(/\d{1,4}/g)].map((m) => parseInt(m[0], 10));
+    const year = numbers.find((n) => n >= 1000);
+    const day = numbers.find((n) => n >= 1 && n <= 31);
+    let monthIndex = null;
+    for (const key of Object.keys(MONTHS)) {
+      if (new RegExp(`\\b${key}`).test(norm)) {
+        monthIndex = MONTHS[key];
+        break;
+      }
+    }
+    if (monthIndex === null || day === undefined) return null;
+    const now = new Date();
+    const y = year !== undefined ? year : now.getFullYear();
+    const guess = new Date(y, monthIndex, day);
+    if (year === undefined && guess.getTime() > now.getTime() + 24 * 3600 * 1000) {
+      guess.setFullYear(guess.getFullYear() - 1);
+    }
+    return guess;
+  }
+
+  // ---- React internals access (optional precision boost) -----------------------
 
   function getReactFiber(dom) {
     const key = Object.keys(dom).find(
@@ -50,8 +105,6 @@
     }
     return null;
   }
-
-  // ---- Message content decoding ------------------------------------------------
 
   function htmlToText(html) {
     const tmp = document.createElement('div');
@@ -86,62 +139,121 @@
     return decorateByType(msgtype, content.body || '');
   }
 
-  // ---- Fallback: plain DOM scraping --------------------------------------------
+  // ---- DOM extraction -------------------------------------------------------------
 
-  let lastKnownSender = { name: 'Unknown', id: 'unknown' };
-
-  function extractFromDom(tileEl) {
-    const senderEl = tileEl.querySelector(SELECTORS.senderName);
-    const bodyEl = tileEl.querySelector(SELECTORS.body);
-    const tsEl = tileEl.querySelector(SELECTORS.timestamp);
-    if (!bodyEl) return null;
-
-    if (senderEl && senderEl.textContent.trim()) {
-      lastKnownSender = { name: senderEl.textContent.trim(), id: senderEl.textContent.trim() };
+  function firstOwn(tileEl, selector) {
+    for (const el of tileEl.querySelectorAll(selector)) {
+      if (!el.closest('.mx_ReplyChain')) return el;
     }
-
-    let ts = null;
-    if (tsEl) {
-      const title = tsEl.getAttribute('title') || '';
-      const parsed = Date.parse(title);
-      if (!Number.isNaN(parsed)) ts = parsed;
-    }
-    if (ts === null) return null; // without a reliable timestamp we can't place this message in range
-
-    const id = tileEl.getAttribute('data-scroll-tokens') || `${ts}-${bodyEl.textContent.slice(0, 20)}`;
-
-    return {
-      id,
-      ts,
-      senderId: lastKnownSender.id,
-      senderName: lastKnownSender.name,
-      body: bodyEl.textContent.trim(),
-      source: 'dom',
-    };
+    return null;
   }
 
-  function extractFromTile(tileEl) {
+  function getTileText(tileEl) {
+    const body = firstOwn(tileEl, '.mx_EventTile_body');
+    if (body) return body.textContent.trim();
+    const fileEl = firstOwn(tileEl, '.mx_MFileBody_info_filename');
+    if (fileEl) return `[file] ${fileEl.textContent.trim()}`;
+    const img = firstOwn(tileEl, '.mx_MImageBody img[alt]');
+    if (img && img.alt) return `[image] ${img.alt}`;
+    const redacted = firstOwn(tileEl, '.mx_RedactedBody');
+    if (redacted) return '[message deleted]';
+    return null;
+  }
+
+  function getTileSender(tileEl, lastSenderRef) {
+    const nameEl = tileEl.querySelector(':scope > .mx_DisambiguatedProfile .mx_DisambiguatedProfile_displayName');
+    if (nameEl && nameEl.textContent.trim()) {
+      const avatarBtn = tileEl.querySelector(':scope > .mx_EventTile_avatar button[title]');
+      lastSenderRef.name = nameEl.textContent.trim();
+      lastSenderRef.id = avatarBtn ? avatarBtn.getAttribute('title') : lastSenderRef.name;
+    }
+    return { name: lastSenderRef.name, id: lastSenderRef.id };
+  }
+
+  function extractTile(tileEl, dayBucket, lastSenderRef) {
+    const sender = getTileSender(tileEl, lastSenderRef);
+    const id = tileEl.getAttribute('data-event-id');
+    if (!id) return null;
+
+    let ts = null;
+    let exact = false;
+    let senderName = sender.name;
+    let senderId = sender.id;
+    let body = null;
+
     const mxEvent = findMatrixEvent(tileEl);
     if (mxEvent) {
       const type = typeof mxEvent.getType === 'function' ? mxEvent.getType() : null;
-      if (type !== 'm.room.message' && type !== 'm.sticker') return null;
-      const content = typeof mxEvent.getContent === 'function' ? mxEvent.getContent() : {};
-      let senderName = mxEvent.getSender ? mxEvent.getSender() : 'unknown';
-      try {
-        if (mxEvent.sender && mxEvent.sender.name) senderName = mxEvent.sender.name;
-      } catch (e) {
-        /* ignore */
+      if (!type || type === 'm.room.message' || type === 'm.sticker') {
+        ts = mxEvent.getTs();
+        exact = true;
+        try {
+          if (mxEvent.sender && mxEvent.sender.name) senderName = mxEvent.sender.name;
+        } catch (e) {
+          /* ignore */
+        }
+        if (typeof mxEvent.getSender === 'function') senderId = mxEvent.getSender();
+        const content = typeof mxEvent.getContent === 'function' ? mxEvent.getContent() : null;
+        if (content) body = contentToText(content);
       }
-      return {
-        id: mxEvent.getId ? mxEvent.getId() : `${mxEvent.getTs()}`,
-        ts: mxEvent.getTs(),
-        senderId: mxEvent.getSender ? mxEvent.getSender() : 'unknown',
-        senderName,
-        body: contentToText(content),
-        source: 'fiber',
-      };
     }
-    return extractFromDom(tileEl);
+
+    if (body === null) body = getTileText(tileEl);
+    if (body === null) return null;
+
+    if (ts === null) {
+      if (!dayBucket) return null;
+      ts = dayBucket.getTime() + 12 * 3600 * 1000;
+    }
+
+    return { id, ts, day: dayBucket ? dayBucket.getTime() : startOfDay(new Date(ts)).getTime(), exact, senderId, senderName, body };
+  }
+
+  function getMessageListEl() {
+    return document.querySelector(SELECTORS.messageList);
+  }
+
+  // Full ordered pass over the currently loaded timeline. Returns both the
+  // oldest day-separator seen (to know when to stop scrolling) and, when
+  // `collect` is true, the ordered, extracted message records.
+  function walkTimeline(collect) {
+    const listEl = getMessageListEl();
+    if (!listEl) return { minDay: null, records: [] };
+
+    let currentDay = null;
+    let minDay = null;
+    const records = [];
+    const lastSenderRef = { name: 'Unknown', id: 'unknown' };
+
+    for (const li of Array.from(listEl.children)) {
+      const sep = li.querySelector(':scope > .mx_TimelineSeparator');
+      if (sep) {
+        const heading = sep.querySelector(SELECTORS.dateHeading);
+        const parsed = heading && parseDaySeparatorText(heading.textContent);
+        if (parsed) {
+          currentDay = parsed;
+          if (minDay === null || parsed.getTime() < minDay.getTime()) minDay = parsed;
+        }
+        continue;
+      }
+      if (li.classList.contains('mx_GenericEventListSummary')) {
+        if (collect) {
+          for (const nested of li.querySelectorAll('.mx_EventTile')) {
+            const rec = extractTile(nested, currentDay, lastSenderRef);
+            if (rec) records.push(rec);
+          }
+        }
+        continue;
+      }
+      if (li.classList.contains('mx_EventTile')) {
+        if (collect) {
+          const rec = extractTile(li, currentDay, lastSenderRef);
+          if (rec) records.push(rec);
+        }
+      }
+    }
+
+    return { minDay, records };
   }
 
   // ---- Scrolling / pagination ---------------------------------------------------
@@ -229,6 +341,7 @@
           results.map((r) => ({
             id: r.id,
             timestamp: new Date(r.ts).toISOString(),
+            exact: r.exact,
             sender: r.senderName,
             senderId: r.senderId,
             message: r.body,
@@ -315,8 +428,6 @@
     if (running) return;
     running = true;
     cancelled = false;
-    const collected = new Map();
-    const processedNodes = new WeakSet();
     showWidget('Starting export…');
 
     try {
@@ -324,6 +435,8 @@
       if (!scrollEl) {
         throw new Error('Could not find the Tchap conversation timeline. Open a conversation with messages visible.');
       }
+
+      const startDayMs = startOfDay(new Date(startTs)).getTime();
 
       let reachedStart = false;
       let iterations = 0;
@@ -334,18 +447,14 @@
       while (!cancelled && !reachedStart && iterations < maxIterations && Date.now() - loopStart < maxDurationMs) {
         iterations++;
 
-        const tiles = document.querySelectorAll(SELECTORS.eventTile);
-        for (const tile of tiles) {
-          if (processedNodes.has(tile)) continue;
-          processedNodes.add(tile);
-          const rec = extractFromTile(tile);
-          if (!rec) continue;
-          if (!collected.has(rec.id)) collected.set(rec.id, rec);
-          if (rec.ts < startTs) reachedStart = true;
-        }
+        const { minDay } = walkTimeline(false);
+        const tileCount = document.querySelectorAll(SELECTORS.eventTile).length;
+        updateWidget(`Loading history… ${tileCount} messages in view`);
 
-        updateWidget(`Scanning… ${collected.size} messages found so far`);
-        if (reachedStart) break;
+        if (minDay && minDay.getTime() < startDayMs) {
+          reachedStart = true;
+          break;
+        }
         if (isAtRoomStart()) {
           updateWidget('Reached the beginning of the conversation.');
           break;
@@ -369,9 +478,10 @@
         return;
       }
 
-      const results = Array.from(collected.values())
-        .filter((r) => r.ts >= startTs && r.ts <= endTs)
-        .sort((a, b) => a.ts - b.ts);
+      updateWidget('Extracting messages…');
+      const { records } = walkTimeline(true);
+      const endDayMs = startOfDay(new Date(endTs)).getTime();
+      const results = records.filter((r) => (r.exact ? r.ts >= startTs && r.ts <= endTs : r.day >= startDayMs && r.day <= endDayMs));
 
       if (results.length === 0) {
         updateWidget('No messages found in that date range.');

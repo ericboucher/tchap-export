@@ -4,11 +4,13 @@ A simple Chrome extension that exports the messages of a [Tchap](https://www.tch
 conversation you have open, restricted to a date range you choose.
 
 Tchap is a soft-fork of Element/Matrix web client, so this extension targets its
-`mx_*` DOM structure. It reads message data from the app's React component tree
-(sender, timestamp, message body) rather than scraping displayed, locale-dependent
-text, so it stays accurate regardless of grouped messages or date/time formatting.
-If that lookup ever fails (e.g. after a Tchap UI update), it falls back to
-scraping the visible DOM text.
+`mx_*` DOM structure. Per-message timestamps aren't reliably present in the DOM
+(Element only renders a timestamp on hover, and even then it's just "HH:MM" with
+no date), so dates are read from the `.mx_DateSeparator` headings Element inserts
+between days ("today", "yesterday", or a full date) — this gives day-level
+accuracy for every message. Where possible, the extension also walks the React
+fiber tree to read the tile's underlying `MatrixEvent` directly for an exact
+millisecond timestamp and sender.
 
 ## Install (unpacked, for development/personal use)
 
@@ -34,26 +36,32 @@ export has started.
 ## How it works
 
 - The content script (`extension/content.js`) locates the scrollable message
-  timeline (`.mx_ScrollPanel`) and each message tile (`.mx_EventTile`).
-- For each tile, it walks the React fiber tree to find the tile's underlying
-  `MatrixEvent` object and reads `getTs()`, `getSender()`, and `getContent()`
-  directly — giving an exact millisecond timestamp and full message body
-  regardless of UI language or message grouping.
+  timeline (`.mx_ScrollPanel`) and walks the message list (`ol.mx_RoomView_MessageList`)
+  top to bottom, tracking the current day from each `.mx_DateSeparator` it passes.
+- For each message tile (`.mx_EventTile`), it first tries to walk the React fiber
+  tree to read the tile's underlying `MatrixEvent` directly (exact timestamp,
+  sender, body). If that isn't available, it falls back to the tile's own
+  `.mx_EventTile_body` text (explicitly excluding any quoted reply text) and the
+  current day bucket for the date.
 - It repeatedly scrolls to the top of the timeline to trigger Tchap's own
-  history pagination, collecting newly rendered tiles after each load, until
-  the requested start date is reached (or there's no more history).
+  history pagination until a day older than the requested start date is loaded
+  (or there's no more history), then does one final pass to extract and filter
+  messages.
 - Only `m.room.message` and `m.sticker` events are included (no membership
   changes, reactions, or redactions).
-- The collected, deduplicated, and sorted messages are exported as a local
-  file download (no data leaves your browser).
+- The extracted messages are exported as a local file download (no data leaves
+  your browser).
 
 ## Limitations
 
 - Only messages your browser can already decrypt (i.e. that you can see while
   viewing the room) are exported — this works like a personal export tool, not
   a bypass of any access control.
-- Encrypted media, files, and images are exported as a placeholder plus their
-  filename, not the actual file contents.
+- Messages without an exact fiber-derived timestamp are filtered by *day*, not
+  time-of-day — e.g. picking a start time of 6pm still includes that whole day's
+  earlier messages if their precise timestamp couldn't be read.
+- Encrypted media and files are exported as a placeholder plus their filename,
+  not the actual file contents.
 - Very long histories are capped at ~800 scroll iterations / 8 minutes as a
   safety net; adjust `maxIterations`/`maxDurationMs` in `content.js` if needed.
 - If Tchap's markup changes significantly, update the selectors in the
