@@ -160,18 +160,38 @@
     return null;
   }
 
-  function getTileSender(tileEl, lastSenderRef) {
-    const nameEl = tileEl.querySelector(':scope > .mx_DisambiguatedProfile .mx_DisambiguatedProfile_displayName');
+  // Element's "bubble" layout doesn't render any sender-name text for 1:1 DMs
+  // (only left/right alignment), so a plain "last seen name" carried forward
+  // across tiles breaks as soon as two people alternate with no name ever
+  // shown. `data-self="true"/"false"` is present on every tile regardless, so
+  // it's used as the primary signal for *who* sent a message, with a cache of
+  // the last known display name/id seen for "me" vs. "the other side".
+  function getTileSender(tileEl, ctx) {
+    const self = tileEl.getAttribute('data-self') === 'true';
+    const key = self ? 'self' : 'other';
+    const nameEl = firstOwn(tileEl, '.mx_DisambiguatedProfile_displayName, .mx_SenderProfile_name');
+    const avatarTitleEl = firstOwn(tileEl, '.mx_EventTile_avatar [title]');
+
     if (nameEl && nameEl.textContent.trim()) {
-      const avatarBtn = tileEl.querySelector(':scope > .mx_EventTile_avatar button[title]');
-      lastSenderRef.name = nameEl.textContent.trim();
-      lastSenderRef.id = avatarBtn ? avatarBtn.getAttribute('title') : lastSenderRef.name;
+      const name = nameEl.textContent.trim();
+      const id = avatarTitleEl ? avatarTitleEl.getAttribute('title') : name;
+      ctx[key] = { name, id };
+      return ctx[key];
     }
-    return { name: lastSenderRef.name, id: lastSenderRef.id };
+    if (avatarTitleEl) {
+      const id = avatarTitleEl.getAttribute('title');
+      const name = ctx[key] ? ctx[key].name : self ? 'Me' : ctx.roomName;
+      ctx[key] = { name, id };
+      return ctx[key];
+    }
+    if (ctx[key]) return ctx[key];
+    const fallback = { name: self ? 'Me' : ctx.roomName, id: self ? 'me' : 'them' };
+    ctx[key] = fallback;
+    return fallback;
   }
 
-  function extractTile(tileEl, dayBucket, lastSenderRef) {
-    const sender = getTileSender(tileEl, lastSenderRef);
+  function extractTile(tileEl, dayBucket, ctx) {
+    const sender = getTileSender(tileEl, ctx);
     const id = tileEl.getAttribute('data-event-id');
     if (!id) return null;
 
@@ -223,7 +243,7 @@
     let currentDay = null;
     let minDay = null;
     const records = [];
-    const lastSenderRef = { name: 'Unknown', id: 'unknown' };
+    const ctx = { self: null, other: null, roomName: getRoomName() };
 
     for (const li of Array.from(listEl.children)) {
       const sep = li.querySelector(':scope > .mx_TimelineSeparator');
@@ -239,7 +259,7 @@
       if (li.classList.contains('mx_GenericEventListSummary')) {
         if (collect) {
           for (const nested of li.querySelectorAll('.mx_EventTile')) {
-            const rec = extractTile(nested, currentDay, lastSenderRef);
+            const rec = extractTile(nested, currentDay, ctx);
             if (rec) records.push(rec);
           }
         }
@@ -247,7 +267,7 @@
       }
       if (li.classList.contains('mx_EventTile')) {
         if (collect) {
-          const rec = extractTile(li, currentDay, lastSenderRef);
+          const rec = extractTile(li, currentDay, ctx);
           if (rec) records.push(rec);
         }
       }
